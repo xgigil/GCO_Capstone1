@@ -25,6 +25,15 @@ GoogleStrategy.prototype.authorizationParams = function (options) {
 
 const appBase = (process.env.APP_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
 
+/** Helper functions to check if a value is true or false 
+ * as Google may send the verified flag as a boolean or as the string "true"/"false". */
+function isTrue(v) {
+  return v === true || v === "true";
+}
+function isFalse(v) {
+  return v === false || v === "false";
+}
+
 passport.use(
   new GoogleStrategy(
     {
@@ -34,11 +43,18 @@ passport.use(
     },
     async (accessToken, refreshToken, profile, done) => {
       try {
-        const rawEmail = profile.emails?.[0]?.value;
-        if (!rawEmail) {
-          return done(null, false, { message: "Google did not return an email address." });
+        // Only trust an email that Google says it has verified.
+        const emails = Array.isArray(profile.emails) ? profile.emails : [];
+        const picked = emails.find((e) => e && e.value && isTrue(e.verified)) || null;
+        if (!picked) {
+          return done(null, false, { message: "Google did not return a verified email address." });
         }
-        const email = String(rawEmail).trim().toLowerCase();
+        // Extra safety: if the raw profile explicitly says "not verified", refuse.
+        if (profile._json && isFalse(profile._json.email_verified)) {
+          return done(null, false, { message: "Google email is not verified." });
+        }
+ 
+        const email = String(picked.value).trim().toLowerCase();
         const googleId = profile.id;
         const name = profile.displayName || email.split("@")[0];
 

@@ -12,6 +12,12 @@ const { sendVerificationEmail } = require("../services/gmailService");
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 4 * 1024 * 1024 } });
+const {
+  getRequiredDomainByRole,
+  normalizeEmail,
+  getEmailDomain,
+  matchesRoleDomain
+} = require("../utils/emailDomain");
 
 function allowPasswordLogin() {
   const v = String(process.env.ALLOW_PASSWORD_LOGIN || "true").toLowerCase();
@@ -24,18 +30,6 @@ router.get("/providers", (_req, res) => {
     google: isGoogleOAuthEnabled() && isGoogleOAuthConfigured()
   });
 });
-
-function getRequiredDomainByRole(role) {
-  if (role === "student") return "my.xu.edu.ph";
-  if (role === "counselor" || role === "admin") return "xu.edu.ph";
-  return null;
-}
-
-function matchesRoleDomain(email, role) {
-  const required = getRequiredDomainByRole(role);
-  if (!required) return false;
-  return email.toLowerCase().endsWith(`@${required}`);
-}
 
 function validateStrongPassword(password) {
   const value = String(password || "");
@@ -67,10 +61,16 @@ router.post("/login", async (req, res) => {
     return res.status(400).json({ message: `Invalid email domain for ${role}. Use @${required}.` });
   }
 
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail || !matchesRoleDomain(normalizedEmail, role)) {
+    const required = getRequiredDomainByRole(role);
+    return res.status(400).json({ message: `Invalid email domain for ${role}. Use @${required}.` });
+  }
+  
   const db = getPool();
   const [rows] = await db.query(
     "SELECT id, full_name, email, password_hash, role, is_active, email_verified FROM users WHERE email = ?",
-    [email]
+    [normalizedEmail]
   );
   const user = rows[0];
   if (!user || !user.is_active) return res.status(401).json({ message: "Invalid credentials" });
@@ -105,51 +105,6 @@ router.post("/signup", async (_req, res) => {
   return res.status(403).json({
     message: "Self sign-up is disabled. Counselor/Admin accounts must be created by an administrator from the Users panel."
   });
-});
-
-router.post("/signup-disabled", async (req, res) => {
-  const { fullName, email, password, role } = req.body || {};
-  if (!fullName || !email || !password || !role) {
-    return res.status(400).json({ message: "fullName, email, password, and role are required." });
-  }
-  const normalizedEmail = String(email).trim().toLowerCase();
-  const normalizedRole = String(role).trim().toLowerCase();
-  if (!["counselor", "admin"].includes(normalizedRole)) {
-    return res.status(400).json({ message: "Only counselor/admin can sign up manually." });
-  }
-  if (!matchesRoleDomain(normalizedEmail, normalizedRole)) {
-    return res.status(400).json({ message: "Counselor/Admin sign-up requires @xu.edu.ph email." });
-  }
-  const passwordValidation = validateStrongPassword(password);
-  if (passwordValidation) {
-    return res.status(400).json({ message: passwordValidation });
-  }
-
-  const db = getPool();
-  const [existing] = await db.query("SELECT id FROM users WHERE email = ?", [normalizedEmail]);
-  if (existing.length) return res.status(409).json({ message: "Email already exists." });
-
-  const passwordHash = await bcrypt.hash(password, 10);
-  const verificationToken = crypto.randomBytes(24).toString("hex");
-  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-  const [out] = await db.query(
-    `INSERT INTO users
-      (full_name, email, password_hash, role, is_active, email_verified, verification_token, verification_expires_at, auth_provider)
-     VALUES (?, ?, ?, ?, 1, 0, ?, ?, 'local')`,
-    [String(fullName).trim(), normalizedEmail, passwordHash, normalizedRole, verificationToken, expiresAt]
-  );
-
-  const base = (process.env.APP_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
-  const verifyUrl = `${base}/api/auth/verify?token=${encodeURIComponent(verificationToken)}`;
-  await sendVerificationEmail({ to: normalizedEmail, verifyUrl });
-
-  await db.query("INSERT INTO audit_logs (actor_id, action, meta) VALUES (?, ?, ?)", [
-    out.insertId,
-    "manual_signup_pending_verification",
-    JSON.stringify({ email: normalizedEmail, role: normalizedRole })
-  ]);
-
-  return res.status(201).json({ ok: true, message: "Sign-up successful. Check your email to verify your account." });
 });
 
 router.get("/verify", async (req, res) => {
@@ -261,3 +216,6 @@ router.delete("/me", requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.normalizeEmail = normalizeEmail;
+module.exports.getEmailDomain = getEmailDomain;
+module.exports.matchesRoleDomain = matchesRoleDomain;

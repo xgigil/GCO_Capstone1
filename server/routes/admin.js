@@ -8,6 +8,11 @@ const { getCounselorSessionAnalytics, getOutcomeBreakdown } = require("../servic
 const router = express.Router();
 router.use(requireAuth, requireRole("admin"));
 
+const {
+  normalizeEmail,
+  matchesRoleDomain
+} = require("../utils/emailDomain");
+
 function csvEscape(v) {
   const s = v == null ? "" : String(v);
   if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
@@ -347,18 +352,6 @@ router.get("/analytics/distinct", async (_req, res) => {
   });
 });
 
-function getRequiredDomainByRole(role) {
-  if (role === "student") return "my.xu.edu.ph";
-  if (role === "counselor" || role === "admin") return "xu.edu.ph";
-  return null;
-}
-
-function matchesRoleDomain(email, role) {
-  const required = getRequiredDomainByRole(role);
-  if (!required) return false;
-  return String(email || "").toLowerCase().endsWith(`@${required}`);
-}
-
 function validateStrongPassword(password) {
   const value = String(password || "");
   if (value.length < 10) return "Password must be at least 10 characters.";
@@ -374,28 +367,31 @@ router.post("/users", async (req, res) => {
   if (!fullName || !email || !password || !role) {
     return res.status(400).json({ message: "fullName, email, password, and role are required." });
   }
-  if (!matchesRoleDomain(email, role)) {
+
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail || !matchesRoleDomain(normalizedEmail, role)) {
     return res.status(400).json({ message: `Invalid email domain for ${role}.` });
   }
+
   const passwordValidation = validateStrongPassword(password);
   if (passwordValidation) {
     return res.status(400).json({ message: passwordValidation });
   }
 
   const db = getPool();
-  const [existing] = await db.query("SELECT id FROM users WHERE email = ?", [String(email).toLowerCase()]);
+  const [existing] = await db.query("SELECT id FROM users WHERE email = ?", [normalizedEmail]);
   if (existing.length > 0) return res.status(409).json({ message: "Email already exists." });
 
   const hash = await bcrypt.hash(password, 10);
   const [result] = await db.query(
     `INSERT INTO users (full_name, email, password_hash, role, email_verified, verification_token, verification_expires_at)
      VALUES (?, ?, ?, ?, 1, NULL, NULL)`,
-    [fullName, String(email).toLowerCase(), hash, role]
+    [fullName, normalizedEmail, hash, role]
   );
   await db.query("INSERT INTO audit_logs (actor_id, action, meta) VALUES (?, ?, ?)", [
     req.user.id,
     "admin_created_user",
-    JSON.stringify({ createdUserId: result.insertId, email: String(email).toLowerCase(), role })
+    JSON.stringify({ createdUserId: result.insertId, email: normalizedEmail, role })
   ]);
   res.status(201).json({ id: result.insertId });
 });
